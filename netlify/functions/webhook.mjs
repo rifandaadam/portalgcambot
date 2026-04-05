@@ -41,24 +41,39 @@ const VIOLATION_MESSAGES = {
 };
 
 // ── Auto-delete timing config ─────────────────────────────────────────────────
-// PENTING: Netlify synchronous functions memiliki timeout 10 detik.
-// setTimeout() fire-and-forget TIDAK bisa diandalkan — begitu handler return,
-// proses di-freeze dan callback tidak pernah jalan.
+// Penghapusan tertunda dilakukan oleh function terpisah (delete-later.mjs)
+// yang dipanggil secara fire-and-forget. Dengan cara ini:
+//   1. webhook.mjs langsung return 200 ke Telegram — tidak blocking
+//   2. Setiap update Telegram diproses di invocation-nya sendiri secara independen
+//   3. Tidak ada masalah timeout 10 detik Netlify
+//   4. Spam foto terkompresi: tiap foto dihapus di invocation-nya sendiri ✅
 //
-// Solusi: gunakan await delay() sebelum deleteMessage(), sehingga penghapusan
-// terjadi dalam window eksekusi yang sama, SEBELUM function return.
-//
-// Konsekuensi: Telegram menunggu response lebih lama, tapi ini aman karena
-// Telegram sendiri punya timeout ~60 detik untuk webhook response.
-// Kita tetap harus return < 10 detik (Netlify limit), jadi delay max = ~8 detik.
-//
-// Untuk delay lebih panjang: gunakan Netlify Background Functions
+// delete-later.mjs adalah Netlify Background Function (timeout 15 menit).
 // Ref: https://docs.netlify.com/functions/background-functions/
-const AUTO_DELETE_WARNING_MS  = 7_000;   // 7 detik — violation warning
-const AUTO_DELETE_INFO_MS     = 8_000;   // 8 detik — notifikasi informasi (max aman)
+const AUTO_DELETE_WARNING_MS  = 8_000;   // 8 detik — violation warning
+const AUTO_DELETE_INFO_MS     = 15_000;  // 15 detik — notifikasi informasi
 
-/** Utility: tunda eksekusi selama ms milidetik (awaitable). */
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// URL base Netlify untuk memanggil delete-later (diisi dari env var)
+// Set di Netlify: Environment Variables → NETLIFY_URL = https://your-site.netlify.app
+const NETLIFY_URL = process.env.NETLIFY_URL || "";
+
+/**
+ * Jadwalkan penghapusan pesan via delete-later.mjs (fire-and-forget).
+ * Tidak di-await — webhook langsung lanjut dan return 200 ke Telegram.
+ * delete-later berjalan di invocation terpisah, delay lalu hapus pesan.
+ */
+function scheduleDelete(chatId, messageId, delayMs) {
+  if (!NETLIFY_URL) {
+    console.warn("scheduleDelete: NETLIFY_URL not set, skipping scheduled delete");
+    return;
+  }
+  // Fire-and-forget ke delete-later-background.mjs — tidak blocking, tiap invocation independen
+  fetch(`${NETLIFY_URL}/.netlify/functions/delete-later-background`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chatId, messageId, delayMs }),
+  }).catch((e) => console.warn("scheduleDelete fetch error:", e.message));
+}
 
 // ── Cooldown cache (in-memory) ────────────────────────────────────────────────
 // Cegah spam notifikasi identik dalam satu window waktu.
@@ -187,10 +202,8 @@ async function sendAutoDeleteWarning(
   const result = await sendMessage(chatId, text, threadId);
   const warningMsgId = result?.result?.message_id;
   if (warningMsgId) {
-    // await delay() — HARUS di-await agar deleteMessage benar-benar terpanggil
-    // sebelum Netlify function selesai. setTimeout fire-and-forget tidak bekerja.
-    await delay(AUTO_DELETE_WARNING_MS);
-    await deleteMessage(chatId, warningMsgId);
+    // Fire-and-forget ke delete-later.mjs — tidak blocking, tiap invocation independen
+    scheduleDelete(chatId, warningMsgId, AUTO_DELETE_WARNING_MS);
   }
 }
 
@@ -223,10 +236,8 @@ async function sendAutoDeleteInfo(
   const result = await sendMessage(chatId, text, threadId);
   const msgId = result?.result?.message_id;
   if (msgId) {
-    // await delay() — HARUS di-await agar deleteMessage benar-benar terpanggil
-    // sebelum Netlify function selesai. setTimeout fire-and-forget tidak bekerja.
-    await delay(AUTO_DELETE_INFO_MS);
-    await deleteMessage(chatId, msgId);
+    // Fire-and-forget ke delete-later.mjs — tidak blocking, tiap invocation independen
+    scheduleDelete(chatId, msgId, AUTO_DELETE_INFO_MS);
   }
 }
 
