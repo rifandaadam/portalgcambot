@@ -6,6 +6,10 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
+# Tidak perlu config khusus untuk background function —
+# suffix "-background" pada nama file sudah cukup untuk Netlify mengenalinya.
+# Ref: https://docs.netlify.com/functions/background-functions/
+
 [[redirects]]
   from = "/webhook"
   to = "/.netlify/functions/webhook"
