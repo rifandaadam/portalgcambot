@@ -1,0 +1,7 @@
+{
+  "name": "telegram-topic-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Telegram topic restriction bot for Netlify — config stored in GitHub repo",
+  "dependencies": {}
+}
