@@ -281,6 +281,7 @@ async function handleStart(message) {
   const cooldownKey = `${message.chat.id}:${message.message_thread_id || 0}:start`;
   await sendAutoDeleteInfo(
     message.chat.id,
+    message.message_thread_id,
     "👋 <b>Topic Restriction Bot</b>\n\n" +
       "Saya menegakkan aturan konten per topik di grup kamu.\n\n" +
       "<b>Perintah admin (gunakan di dalam topik):</b>\n" +
@@ -291,9 +292,8 @@ async function handleStart(message) {
       "/viewconfig — Lihat isi rules.json lengkap\n\n" +
       "⚠️ Setelah /restrict atau /unrestrict, tunggu ~30 detik untuk Netlify redeploy.\n\n" +
       `<i>💬 Pesan ini otomatis hilang dalam ${AUTO_DELETE_INFO_MS / 1000} detik.</i>`,
-    message.message_thread_id,
     cooldownKey,
-    30_000 // cooldown 30 detik untuk /start
+    30_000
   );
 }
 
@@ -312,8 +312,8 @@ async function handleAllRules(message) {
 
   await sendAutoDeleteInfo(
     message.chat.id,
-    lines.join("\n"),
     message.message_thread_id,
+    lines.join("\n"),
     cooldownKey,
     15_000
   );
