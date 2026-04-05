@@ -1,13 +1,13 @@
 // netlify/functions/webhook.mjs
 // Telegram Topic Restriction Bot — Netlify + GitHub as config store
 //
+// Dokumentasi Telegram Bot API: https://core.telegram.org/bots/api
+//
 // Flow:
 //   Admin: /restrict no_photo  (di dalam topic)
 //     → Bot update rules.json di GitHub via API (auto-commit)
 //     → Netlify detect push → auto redeploy (~30 detik)
 //     → Rule aktif ✅
-//
-// Tidak butuh database eksternal sama sekali.
 
 import { getTopicRules, setTopicRule, fetchRules } from "./lib/github.mjs";
 
@@ -16,14 +16,14 @@ const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 // ── Restriction definitions ───────────────────────────────────────────────────
 const RESTRICTION_KEYS = {
-  no_photo:      "📷 Compressed photos (must send as file/document)",
-  no_sticker:    "🎭 Stickers",
-  no_gif:        "🎞️ GIFs / Animations",
-  no_voice:      "🎙️ Voice messages",
-  no_video_note: "📹 Video notes (circles)",
-  no_poll:       "📊 Polls",
-  no_video:      "🎬 Videos (compressed)",
-  no_audio:      "🎵 Audio messages",
+  no_photo:      "📷 Foto terkompresi (harus kirim sebagai file/dokumen)",
+  no_sticker:    "🎭 Stiker",
+  no_gif:        "🎞️ GIF / Animasi",
+  no_voice:      "🎙️ Pesan suara",
+  no_video_note: "📹 Video note (lingkaran)",
+  no_poll:       "📊 Polling",
+  no_video:      "🎬 Video terkompresi",
+  no_audio:      "🎵 Pesan audio",
 };
 
 const VIOLATION_MESSAGES = {
@@ -41,38 +41,71 @@ const VIOLATION_MESSAGES = {
 };
 
 // ── Telegram API helpers ──────────────────────────────────────────────────────
+
+/**
+ * Panggil method Telegram Bot API.
+ * Ref: https://core.telegram.org/bots/api#making-requests
+ * Format: POST https://api.telegram.org/bot<token>/METHOD_NAME
+ */
 async function callTelegram(method, body) {
   const res = await fetch(`${TELEGRAM_API}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return res.json();
+  const data = await res.json();
+  if (!data.ok) {
+    // Log error tapi jangan throw — biarkan bot tetap jalan
+    console.warn(`Telegram API error [${method}]:`, data.description);
+  }
+  return data;
 }
 
+/**
+ * Kirim pesan teks.
+ * Ref: https://core.telegram.org/bots/api#sendmessage
+ * - chat_id: integer atau string (untuk channel @username)
+ * - message_thread_id: ID topik forum (integer), optional
+ * - parse_mode: "HTML" atau "MarkdownV2"
+ */
 async function sendMessage(chatId, text, threadId = null, extra = {}) {
   return callTelegram("sendMessage", {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
+    // message_thread_id hanya dikirim jika ada (untuk forum topics)
     ...(threadId ? { message_thread_id: threadId } : {}),
     ...extra,
   });
 }
 
+/**
+ * Hapus pesan.
+ * Ref: https://core.telegram.org/bots/api#deletemessage
+ * Bot harus punya permission "can_delete_messages".
+ */
 async function deleteMessage(chatId, messageId) {
-  try {
-    await callTelegram("deleteMessage", { chat_id: chatId, message_id: messageId });
-  } catch (e) {
-    console.warn("Could not delete message:", e);
-  }
+  const result = await callTelegram("deleteMessage", {
+    chat_id: chatId,
+    message_id: messageId,
+  });
+  return result;
 }
 
+/**
+ * Ambil daftar administrator grup.
+ * Ref: https://core.telegram.org/bots/api#getchatadministrators
+ * Return: array of ChatMember objects
+ */
 async function getChatAdmins(chatId) {
   const res = await callTelegram("getChatAdministrators", { chat_id: chatId });
   return res.result || [];
 }
 
+/**
+ * Kirim pesan warning yang otomatis terhapus setelah 8 detik.
+ * Netlify function timeout default 10 detik — cukup untuk setTimeout 8 detik.
+ */
 async function sendAutoDeleteWarning(chatId, threadId, text) {
   const result = await sendMessage(chatId, text, threadId);
   const warningMsgId = result?.result?.message_id;
@@ -84,6 +117,22 @@ async function sendAutoDeleteWarning(chatId, threadId, text) {
 }
 
 // ── Violation detection ───────────────────────────────────────────────────────
+/**
+ * Deteksi tipe pelanggaran berdasarkan field yang ada di Message object.
+ * Ref: https://core.telegram.org/bots/api#message
+ *
+ * Field-field yang dicek:
+ * - photo: array of PhotoSize — ada jika pesan adalah foto terkompresi
+ * - sticker: Sticker object
+ * - animation: Animation object — GIF atau video animasi
+ * - voice: Voice object — pesan suara (OGG)
+ * - video_note: VideoNote object — video lingkaran
+ * - poll: Poll object
+ * - video: Video object — video terkompresi (MP4 dll)
+ * - audio: Audio object — file audio (MP3 dll)
+ *
+ * CATATAN: document (file) TIDAK diblokir — itu yang kita mau untuk no_photo
+ */
 function detectViolation(message, rules) {
   if (rules.no_photo      && message.photo)      return "no_photo";
   if (rules.no_sticker    && message.sticker)    return "no_sticker";
@@ -171,8 +220,14 @@ async function handleRestrict(message, args, isAdmin) {
     return;
   }
 
-  // Cek apakah sudah aktif
-  const current = await getTopicRules(message.chat.id, threadId);
+  let current;
+  try {
+    current = await getTopicRules(message.chat.id, threadId);
+  } catch (e) {
+    await sendMessage(message.chat.id, "❌ Gagal membaca GitHub: " + e.message, threadId);
+    return;
+  }
+
   if (current[key]) {
     await sendMessage(
       message.chat.id,
@@ -218,7 +273,14 @@ async function handleUnrestrict(message, args, isAdmin) {
     return;
   }
 
-  const current = await getTopicRules(message.chat.id, threadId);
+  let current;
+  try {
+    current = await getTopicRules(message.chat.id, threadId);
+  } catch (e) {
+    await sendMessage(message.chat.id, "❌ Gagal membaca GitHub: " + e.message, threadId);
+    return;
+  }
+
   if (!current[key]) {
     await sendMessage(
       message.chat.id,
@@ -261,44 +323,62 @@ async function handleViewConfig(message, isAdmin) {
   }
 
   const json = JSON.stringify(rules, null, 2);
+  // Telegram HTML: gunakan <pre> untuk monospace, max panjang pesan 4096 karakter
+  const preview = json.length > 3500 ? json.slice(0, 3500) + "\n... (terpotong)" : json;
   await sendMessage(
     message.chat.id,
-    `📄 <b>Isi rules.json saat ini:</b>\n\n<pre>${json}</pre>`,
+    `📄 <b>Isi rules.json saat ini:</b>\n\n<pre>${preview}</pre>`,
     message.message_thread_id
   );
 }
 
 // ── Main webhook handler ──────────────────────────────────────────────────────
+/**
+ * Handler utama Netlify Function.
+ * Telegram mengirim POST request berisi JSON Update object setiap ada aktivitas.
+ * Ref: https://core.telegram.org/bots/api#update
+ *
+ * Kita harus selalu return HTTP 200 — jika tidak, Telegram akan retry terus.
+ */
 export const handler = async (event) => {
+  // Telegram hanya mengirim POST
   if (event.httpMethod !== "POST") {
-    return { statusCode: 405, body: "Method Not Allowed" };
+    return { statusCode: 200, body: "OK" };
   }
 
   let update;
   try {
     update = JSON.parse(event.body);
   } catch {
-    return { statusCode: 400, body: "Bad Request" };
+    return { statusCode: 200, body: "OK" }; // tetap 200 agar Telegram tidak retry
   }
 
+  // Ambil message dari update
+  // Ref: https://core.telegram.org/bots/api#update
+  // "message" = pesan baru, "edited_message" = pesan yang diedit
   const message = update.message || update.edited_message;
   if (!message) return { statusCode: 200, body: "OK" };
 
-  const chatId = message.chat.id;
-  const threadId = message.message_thread_id || null;
+  const chatId = message.chat.id;           // integer
+  const threadId = message.message_thread_id || null; // integer, hanya ada di forum topics
   const text = message.text || "";
-  const userId = message.from?.id;
+  const userId = message.from?.id;          // integer, ID pengirim
 
-  // Parse command
-  const commandMatch = text.match(/^\/([a-z_]+)(?:@\S+)?\s*(.*)/i);
+  // ── Parse command ─────────────────────────────────────────────────────────
+  // Format command Telegram: /command atau /command@botusername
+  // Ref: https://core.telegram.org/bots/features#commands
+  const commandMatch = text.match(/^\/([a-zA-Z_]+)(?:@\S+)?(?:\s+(.*))?$/s);
 
   if (commandMatch) {
     const cmd = commandMatch[1].toLowerCase();
-    const args = commandMatch[2].trim().split(/\s+/).filter(Boolean);
+    const argStr = (commandMatch[2] || "").trim();
+    const args = argStr ? argStr.split(/\s+/) : [];
 
+    // Cek admin status hanya untuk command yang membutuhkan
     let isAdmin = false;
     if (["restrict", "unrestrict", "viewconfig"].includes(cmd)) {
       const admins = await getChatAdmins(chatId);
+      // Cocokkan user.id (integer) — jangan pakai == karena tipe bisa berbeda
       isAdmin = admins.some((a) => a.user.id === userId);
     }
 
@@ -322,23 +402,29 @@ export const handler = async (event) => {
       case "viewconfig":
         await handleViewConfig(message, isAdmin);
         break;
+      // Command lain diabaikan — return 200 tetap
     }
 
     return { statusCode: 200, body: "OK" };
   }
 
-  // ── Enforce restrictions ──────────────────────────────────────────────────
+  // ── Enforce restrictions pada pesan non-command ───────────────────────────
+  // Hanya enforce jika pesan ada di dalam topik (threadId tidak null)
   if (threadId) {
     let rules = {};
     try {
       rules = await getTopicRules(chatId, threadId);
     } catch (e) {
-      console.error("Failed to fetch rules:", e);
+      // Jika gagal baca rules, jangan blokir pesan — log saja
+      console.error("Failed to fetch rules:", e.message);
     }
 
     const violation = detectViolation(message, rules);
     if (violation) {
+      // Hapus pesan pelanggar
       await deleteMessage(chatId, message.message_id);
+
+      // Kirim warning ramah yang auto-delete setelah 8 detik
       const name = message.from?.first_name || "User";
       const warningText =
         `Hei ${name}! ⚠️\n\n` +
@@ -348,5 +434,6 @@ export const handler = async (event) => {
     }
   }
 
+  // Selalu return 200 ke Telegram
   return { statusCode: 200, body: "OK" };
 };
