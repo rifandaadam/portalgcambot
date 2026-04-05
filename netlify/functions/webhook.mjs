@@ -41,11 +41,24 @@ const VIOLATION_MESSAGES = {
 };
 
 // ── Auto-delete timing config ─────────────────────────────────────────────────
-// Netlify function timeout default 10 detik (background functions: 15 menit).
-// Gunakan Netlify Background Functions jika ingin delay lebih panjang.
+// PENTING: Netlify synchronous functions memiliki timeout 10 detik.
+// setTimeout() fire-and-forget TIDAK bisa diandalkan — begitu handler return,
+// proses di-freeze dan callback tidak pernah jalan.
+//
+// Solusi: gunakan await delay() sebelum deleteMessage(), sehingga penghapusan
+// terjadi dalam window eksekusi yang sama, SEBELUM function return.
+//
+// Konsekuensi: Telegram menunggu response lebih lama, tapi ini aman karena
+// Telegram sendiri punya timeout ~60 detik untuk webhook response.
+// Kita tetap harus return < 10 detik (Netlify limit), jadi delay max = ~8 detik.
+//
+// Untuk delay lebih panjang: gunakan Netlify Background Functions
 // Ref: https://docs.netlify.com/functions/background-functions/
-const AUTO_DELETE_WARNING_MS  = 8_000;   // 8 detik — violation warning (singkat, urgent)
-const AUTO_DELETE_INFO_MS     = 20_000;  // 20 detik — notifikasi informasi (lebih lama, bisa dibaca)
+const AUTO_DELETE_WARNING_MS  = 7_000;   // 7 detik — violation warning
+const AUTO_DELETE_INFO_MS     = 8_000;   // 8 detik — notifikasi informasi (max aman)
+
+/** Utility: tunda eksekusi selama ms milidetik (awaitable). */
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ── Cooldown cache (in-memory) ────────────────────────────────────────────────
 // Cegah spam notifikasi identik dalam satu window waktu.
@@ -174,9 +187,10 @@ async function sendAutoDeleteWarning(
   const result = await sendMessage(chatId, text, threadId);
   const warningMsgId = result?.result?.message_id;
   if (warningMsgId) {
-    setTimeout(async () => {
-      await deleteMessage(chatId, warningMsgId);
-    }, AUTO_DELETE_WARNING_MS);
+    // await delay() — HARUS di-await agar deleteMessage benar-benar terpanggil
+    // sebelum Netlify function selesai. setTimeout fire-and-forget tidak bekerja.
+    await delay(AUTO_DELETE_WARNING_MS);
+    await deleteMessage(chatId, warningMsgId);
   }
 }
 
@@ -209,9 +223,10 @@ async function sendAutoDeleteInfo(
   const result = await sendMessage(chatId, text, threadId);
   const msgId = result?.result?.message_id;
   if (msgId) {
-    setTimeout(async () => {
-      await deleteMessage(chatId, msgId);
-    }, AUTO_DELETE_INFO_MS);
+    // await delay() — HARUS di-await agar deleteMessage benar-benar terpanggil
+    // sebelum Netlify function selesai. setTimeout fire-and-forget tidak bekerja.
+    await delay(AUTO_DELETE_INFO_MS);
+    await deleteMessage(chatId, msgId);
   }
 }
 
