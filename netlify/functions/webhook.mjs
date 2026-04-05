@@ -633,7 +633,19 @@ export const handler = async (event) => {
     if (["restrict", "unrestrict", "viewconfig"].includes(cmd)) {
       const admins = await getChatAdmins(chatId);
       // Cocokkan user.id (integer) — jangan pakai == karena tipe bisa berbeda
-      isAdmin = admins.some((a) => a.user.id === userId);
+      const adminMember = admins.find((a) => a.user.id === userId);
+
+      if (adminMember) {
+        // Creator (owner) selalu memiliki semua permission termasuk manage_topics
+        // Ref: https://core.telegram.org/bots/api#chatmembercreator
+        if (adminMember.status === "creator") {
+          isAdmin = true;
+        } else {
+          // Admin biasa: hanya izinkan jika can_manage_topics === true
+          // Ref: https://core.telegram.org/bots/api#chatmemberadministrator
+          isAdmin = adminMember.can_manage_topics === true;
+        }
+      }
     }
 
     switch (cmd) {
